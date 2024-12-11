@@ -78,6 +78,13 @@ def replace_translation_function(
             logger.error(f"Error processing file {file}: {str(e)}")
 
 
-class MigrationScript(BaseMigrationScript):
+_TEXT_REPLACES = {
+    ".py": {
+        r"\btrack_visibility='[^']*'": "tracking=True",
+    },
+}
 
-    _GLOBAL_FUNCTIONS = [replace_translation_function]
+
+class MigrationScript(BaseMigrationScript):
+    _TEXT_REPLACES = _TEXT_REPLACES
+   _GLOBAL_FUNCTIONS_GLOBAL_FUNCTIONS = [replace_translation_function]
