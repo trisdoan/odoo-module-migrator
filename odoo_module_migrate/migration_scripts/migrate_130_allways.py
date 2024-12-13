@@ -1,83 +1,101 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 import re
 from odoo_module_migrate.base_migration_script import BaseMigrationScript
+from pathlib import Path
+import sys
+import os
+import ast
+from typing import Any
+from astroid import ClassDef, FunctionDef, NodeNG, nodes
+
+# TODO: list all cases to handle
+## 1st: _("Cash difference observed during the counting (%s)") % name -> _("Cash difference observed during the counting (%s)", name)
+## 2nd: use .format -> _("It's %s", 2024)
 
 
-def multi_value_translation_replacement_function(match, single_quote=True):
-    format_string = match.group(1)
-    dictionary_entries = match.group(2)
-
-    formatted_entries = []
-    for entry in dictionary_entries.split(","):
-        if ":" in entry:
-            [key, value] = entry.split(":")
-            formatted_entries.append(
-                "{}={}".format(key.strip().strip("'").strip('"'), value.strip())
-            )
-
-    formatted_entries = ", ".join(formatted_entries)
-
-    if single_quote:
-        return f"_('{format_string}', {formatted_entries})"
-    return f'_("{format_string}", {formatted_entries})'
+### TODO: list all test cases
 
 
-def format_parenthesis(match):
-    format_string = match.group(1)
-    dictionary_entries = match.group(2)
+class VisitorPlaceHolder(ast.NodeVisitor):
+    def visit_Call(self, node):
+        # Check if the function is a translation function
+        if isinstance(node.func, ast.Name) and node.func.id == "(":
+            if node.args:
+                arg = node.args[0]
+                print(f"Visiting node: {ast.dump(node)}")
+                # Case 1: Using % formatting
+                if isinstance(arg, ast.BinOp) and arg.op == "%":
+                    print("case 1")
+                    # if isinstance(arg.left, ast.Str):
+                    #     # Convert to new syntax
+                    #     new_args = [arg.left] + [arg.right]
+                    #     return ast.Call(func=node.func, args=new_args, keywords=[])
+                # Case 2: Using .format()
+                elif (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Attribute)
+                    and arg.func.attr == "format"
+                ):
+                    print("case 2")
+                    # if isinstance(arg.func.value, ast.Str):
+                    #     # Convert to new syntax
+                    #     new_args = [arg.func.value] + arg.args
+                    #     return ast.Call(func=node.func, args=new_args, keywords=[])
+        return self.generic_visit(node)
 
-    if dictionary_entries.endswith(","):
-        dictionary_entries = dictionary_entries[:-1]
-
-    return f"_({format_string}, {dictionary_entries})"
-
-
-def format_replacement_function(match, single_quote=True):
-    format_string = re.sub(r"\{\d*\}", "%s", match.group(1))
-    format_string = re.sub(r"{(\w+)}", r"%(\1)s", format_string)
-    arguments = " ".join(match.group(2).split())
-
-    if arguments.endswith(","):
-        arguments = arguments[:-1]
-
-    if single_quote:
-        return f"_('{format_string}', {arguments})"
-    return f'_("{format_string}", {arguments})'
+    # def post_process(self, all_code: str, file: str) -> str:
+    #     all_lines = all_code.split("\n")
+    #     for i, line in enumerate(all_lines):
+    #         if "_(" in line:
+    #             print("testing", line)
+    #     return "\n".join(all_lines)
 
 
-def replace_translation_function(
+def _replace_translation_syntax(logger, filename):
+    with open(filename, mode="rt") as file:
+        new_all = all_code = file.read()
+        # only reduce logger for impact file
+        visitor = VisitorPlaceHolder()
+        try:
+            tree = ast.parse(new_all)
+            tree = visitor.visit(tree)
+        except Exception:
+            logger.info(f"ERROR in {filename} at step {visitor.__class__}: \n{new_all}")
+            raise
+        # new_all = visitor.post_process(new_all, filename)
+        # if new_all == all_code:
+        #     logger.info("read_group detected but not changed in file %s" % filename)
+
+    if new_all != all_code:
+        logger.info("Script read_group replace applied in file %s" % filename)
+        with open(filename, mode="wt") as file:
+            file.write(new_all)
+
+
+def _get_files(module_path, reformat_file_ext):
+    """Get files to be reformatted."""
+    file_paths = list()
+    if not module_path.is_dir():
+        raise Exception(f"'{module_path}' is not a directory")
+    file_paths.extend(module_path.rglob("*" + reformat_file_ext))
+    return file_paths
+
+
+def replace_translation_syntax(
     logger, module_path, module_name, manifest_path, migration_steps, tools
 ):
-    files_to_process = tools.get_files(module_path, (".py",))
+    reformat_file_ext = ".py"
+    file_paths = _get_files(module_path, reformat_file_ext)
+    logger.debug(f"{reformat_file_ext} files found:\n" f"{list(map(str, file_paths))}")
 
-    replaces = {
-        r'_\(\s*"([^"]+)"\s*\)\s*%\s*\{([^}]+)\}': lambda match: multi_value_translation_replacement_function(
-            match, single_quote=False
-        ),
-        r"_\(\s*'([^']+)'\s*\)\s*%\s*\{([^}]+)\}": lambda match: multi_value_translation_replacement_function(
-            match, single_quote=True
-        ),
-        r'_\(\s*(["\'].*?%[ds].*?["\'])\s*\)\s*%\s*\(\s*(.+)\s*\)': format_parenthesis,
-        r'_\(\s*(["\'].*?%[ds].*?["\'])\s*\)\s*?%\s*?([^\s]+)': r"_(\1, \2)",
-        r'_\(\s*"([^"]*)"\s*\)\.format\(\s*(\s*[^)]+)\)': lambda match: format_replacement_function(
-            match, single_quote=False
-        ),
-        r"_\(\s*'([^']*)'\s*\)\.format\(\s*(\s*[^)]+)\)": lambda match: format_replacement_function(
-            match, single_quote=True
-        ),
-    }
-
-    for file in files_to_process:
-        try:
-            tools._replace_in_file(
-                file,
-                replaces,
-                log_message=f"""Improve _() function: {file}""",
-            )
-        except Exception as e:
-            logger.error(f"Error processing file {file}: {str(e)}")
+    reformatted_files = list()
+    for file_path in file_paths:
+        reformatted_file = _replace_translation_syntax(logger, file_path)
+        if reformatted_file:
+            reformatted_files.append(reformatted_file)
+    logger.debug("Reformatted files:\n" f"{list(reformatted_files)}")
 
 
 class MigrationScript(BaseMigrationScript):
 
-    _GLOBAL_FUNCTIONS = [replace_translation_function]
+    _GLOBAL_FUNCTIONS = [replace_translation_syntax]
